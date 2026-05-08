@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shopping Assistant</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#09090f;--surface:#12121c;--surface2:#1a1a28;--border:#1e1e30;
+  --accent:#7c6ef7;--accent-dim:#5b52c4;--accent2:#b06ef7;
+  --user-bub:#7c6ef7;--bot-bub:#1a1a28;
+  --text:#e8e8f2;--muted:#6868a0;
+  --error:#f87171;--error-bg:rgba(248,113,113,.1);
+  --radius:16px;--font:'Inter',system-ui,sans-serif
+}
+body{background:var(--bg);color:var(--text);font-family:var(--font);
+  height:100dvh;display:flex;align-items:center;justify-content:center;overflow:hidden}
+#shell{width:100%;max-width:820px;height:100dvh;max-height:900px;
+  display:flex;flex-direction:column;background:var(--surface);
+  border:1px solid var(--border);border-radius:22px;overflow:hidden;
+  box-shadow:0 32px 100px rgba(0,0,0,.6)}
+/* Header */
+#header{display:flex;align-items:center;gap:12px;padding:16px 20px;
+  background:var(--surface2);border-bottom:1px solid var(--border);
+  flex-shrink:0;user-select:none}
+.hdr-logo{width:38px;height:38px;border-radius:12px;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.hdr-info h2{font-size:15px;font-weight:700}
+.hdr-info span{font-size:11px;color:var(--muted)}
+.status-pill{display:flex;align-items:center;gap:5px;margin-left:auto;
+  font-size:11px;font-weight:600;padding:4px 11px;border-radius:20px;
+  background:rgba(124,110,247,.1);border:1px solid rgba(124,110,247,.25);
+  color:#a89df7;text-transform:uppercase;letter-spacing:.5px;transition:all .3s}
+.status-dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.status-pill.loading{background:rgba(251,191,36,.1);border-color:rgba(251,191,36,.3);color:#fbbf24}
+.status-pill.loading .status-dot{background:#fbbf24;animation:blink .8s infinite}
+.status-pill.err{background:rgba(248,113,113,.1);border-color:rgba(248,113,113,.3);color:var(--error)}
+.status-pill.err .status-dot{background:var(--error)}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.hdr-actions{display:flex;gap:8px;margin-left:10px}
+.hdr-btn{background:none;border:1px solid var(--border);color:var(--muted);
+  border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;
+  font-family:var(--font);transition:all .2s;text-decoration:none;
+  display:inline-flex;align-items:center}
+.hdr-btn:hover{border-color:var(--accent);color:var(--accent)}
+/* Messages */
+#messages{flex:1;overflow-y:auto;padding:24px 20px;
+  display:flex;flex-direction:column;gap:18px;scroll-behavior:smooth}
+#messages::-webkit-scrollbar{width:5px}
+#messages::-webkit-scrollbar-track{background:transparent}
+#messages::-webkit-scrollbar-thumb{background:var(--border);border-radius:5px}
+/* Welcome */
+#welcome{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  flex:1;text-align:center;gap:12px;padding:40px 16px;animation:fadein .4s ease}
+.wlc-icon{font-size:52px}
+#welcome h3{font-size:22px;font-weight:800}
+#welcome p{font-size:14px;color:var(--muted);max-width:360px;line-height:1.65}
+.suggestions{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;
+  margin-top:10px;max-width:520px}
+.sug-btn{background:var(--surface2);border:1px solid var(--border);color:var(--text);
+  border-radius:20px;padding:8px 15px;font-size:13px;cursor:pointer;
+  font-family:var(--font);transition:all .2s;text-align:left}
+.sug-btn:hover{border-color:var(--accent);color:var(--accent);
+  background:rgba(124,110,247,.05)}
+/* Rows */
+.msg-row{display:flex;gap:10px;align-items:flex-end;animation:fadein .25s ease}
+.msg-row.user{flex-direction:row-reverse}
+@keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1}}
+.msg-av{width:30px;height:30px;border-radius:50%;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:14px}
+.msg-row.bot .msg-av{background:linear-gradient(135deg,var(--accent),var(--accent2))}
+.msg-row.user .msg-av{background:#24243a}
+.msg-col{display:flex;flex-direction:column;gap:4px;max-width:74%}
+.msg-row.user .msg-col{align-items:flex-end}
+.bubble{padding:11px 15px;border-radius:var(--radius);
+  font-size:14px;line-height:1.65;white-space:pre-wrap;word-break:break-word}
+.msg-row.bot  .bubble{background:var(--bot-bub);border-bottom-left-radius:4px}
+.msg-row.user .bubble{background:var(--user-bub);color:#fff;border-bottom-right-radius:4px}
+.bubble.err-bub{background:var(--error-bg);border:1px solid rgba(248,113,113,.3);color:var(--error)}
+.msg-meta{font-size:10px;color:var(--muted);padding:0 4px;
+  display:flex;align-items:center;gap:6px}
+.intent-badge{display:inline-block;font-size:9px;font-weight:700;
+  padding:2px 7px;border-radius:10px;letter-spacing:.5px;text-transform:uppercase}
+.intent-product{background:rgba(52,211,153,.12);color:#34d399}
+.intent-support{background:rgba(96,165,250,.12);color:#60a5fa}
+.intent-hybrid{background:rgba(192,132,252,.12);color:#c084fc}
+/* Typing */
+.typing-row{display:flex;gap:10px;align-items:flex-end;animation:fadein .25s ease}
+.typing-bub{background:var(--bot-bub);border-radius:var(--radius);
+  border-bottom-left-radius:4px;padding:14px 18px;
+  display:flex;gap:5px;align-items:center}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--muted);
+  animation:bounce 1.4s infinite ease-in-out}
+.dot:nth-child(2){animation-delay:.2s}
+.dot:nth-child(3){animation-delay:.4s}
+@keyframes bounce{0%,80%,100%{transform:scale(.75);opacity:.5}40%{transform:scale(1.1);opacity:1}}
+/* Input */
+#input-area{padding:14px 18px 18px;background:var(--surface2);
+  border-top:1px solid var(--border);flex-shrink:0}
+#input-row{display:flex;align-items:flex-end;gap:10px;background:var(--surface);
+  border:1.5px solid var(--border);border-radius:14px;padding:10px 12px;
+  transition:border-color .2s}
+#input-row:focus-within{border-color:var(--accent)}
+#msg-input{flex:1;background:none;border:none;outline:none;color:var(--text);
+  font-family:var(--font);font-size:14px;resize:none;line-height:1.5;max-height:130px}
+#msg-input::placeholder{color:var(--muted)}
+#send-btn{width:36px;height:36px;border-radius:10px;flex-shrink:0;
+  background:var(--accent);border:none;color:#fff;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:background .2s,transform .1s,opacity .2s}
+#send-btn:hover:not(:disabled){background:var(--accent-dim)}
+#send-btn:active:not(:disabled){transform:scale(.92)}
+#send-btn:disabled{background:var(--border);cursor:not-allowed;opacity:.6}
+#send-btn svg{width:16px;height:16px}
+#input-hint{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
+kbd{background:var(--surface);border:1px solid var(--border);border-radius:4px;
+  padding:1px 5px;font-size:10px;font-family:var(--font)}
+@media(max-width:600px){
+  body{align-items:stretch}
+  #shell{border-radius:0;max-height:100dvh}
+  .msg-col{max-width:86%}
+  .hdr-info{display:none}
+}
+</style>
+</head>
+<body>
+<div id="shell">
+
+  <div id="header">
+    <div class="hdr-logo">🛍️</div>
+    <div class="hdr-info">
+      <h2>Shopping Assistant</h2>
+      <span>Llama 3 · RAG · FAISS</span>
+    </div>
+    <div class="status-pill" id="status-pill">
+      <div class="status-dot"></div>
+      <span id="status-text">Ready</span>
+    </div>
+    <div class="hdr-actions">
+      <button class="hdr-btn" id="new-chat-btn">↺ New Chat</button>
+      <a href="/" class="hdr-btn">← Home</a>
+    </div>
+  </div>
+
+  <div id="messages">
+    <div id="welcome">
+      <div class="wlc-icon">✨</div>
+      <h3>How can I help you today?</h3>
+      <p>Ask about products, sizing, returns, shipping — anything about the store.</p>
+      <div class="suggestions">
+        <button class="sug-btn" onclick="fillSuggestion(this)">Show me black dresses under $60</button>
+        <button class="sug-btn" onclick="fillSuggestion(this)">What's your return policy?</button>
+        <button class="sug-btn" onclick="fillSuggestion(this)">Find a summer jacket and tell me shipping times</button>
+        <button class="sug-btn" onclick="fillSuggestion(this)">Do you have women's jeans in size 28?</button>
+        <button class="sug-btn" onclick="fillSuggestion(this)">What sizes does the yoga leggings come in?</button>
+        <button class="sug-btn" onclick="fillSuggestion(this)">How do I exchange an item?</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="input-area">
+    <div id="input-row">
+      <textarea id="msg-input" rows="1"
+        placeholder="Ask about products, returns, shipping…"
+        oninput="onInputChange()" onkeydown="onKeyDown(event)"></textarea>
+      <button id="send-btn" disabled onclick="sendMessage()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+      </button>
+    </div>
+    <div id="input-hint">
+      <kbd>Enter</kbd> send &nbsp;·&nbsp; <kbd>Shift+Enter</kbd> new line
+    </div>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+
+/* ── State ── */
+const State = {
+  sessionId: localStorage.getItem('sa_session_id') || null,
+  isLoading: false,
+};
+
+/* ── API ── */
+const API = {
+  async send(message) {
+    const body = { message };
+    if (State.sessionId) body.session_id = State.sessionId;
+    const res  = await fetch('/api/chat/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Server error ' + res.status);
+    return data;
+  },
+  async history(sid) {
+    const res  = await fetch('/api/chat/history/?session_id=' + sid);
+    const data = await res.json();
+    return data.messages || [];
+  },
+  async reset(sid) {
+    await fetch('/api/chat/reset/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
+      body: JSON.stringify({ session_id: sid }),
+    });
+  },
+};
+
+/* ── DOM refs ── */
+const $       = id => document.getElementById(id);
+const msgEl   = $('messages');
+const inputEl = $('msg-input');
+const sendBtn = $('send-btn');
+
+/* ── Status pill ── */
+function setStatus(cls, txt) {
+  const pill = $('status-pill');
+  pill.className = 'status-pill' + (cls ? ' ' + cls : '');
+  $('status-text').textContent = txt;
+}
+
+/* ── Loading state ── */
+function setLoading(v) {
+  State.isLoading = v;
+  inputEl.disabled = v;
+  syncBtn();
+  if (v) setStatus('loading', 'Thinking…');
+  else   setStatus('', 'Ready');
+}
+function syncBtn() {
+  sendBtn.disabled = State.isLoading || !inputEl.value.trim();
+}
+
+/* ── Scroll ── */
+function scrollDown(smooth) {
+  msgEl.scrollTo({ top: msgEl.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
+}
+
+/* ── Remove welcome screen ── */
+function removeWelcome() {
+  const w = $('welcome');
+  if (w) w.remove();
+}
+
+/* ── Append message ── */
+function appendMsg(role, text, intent, isErr) {
+  const row = document.createElement('div');
+  row.className = 'msg-row ' + role;
+
+  const av = document.createElement('div');
+  av.className = 'msg-av';
+  av.textContent = role === 'user' ? '👤' : '🤖';
+
+  const col = document.createElement('div');
+  col.className = 'msg-col';
+
+  const bub = document.createElement('div');
+  bub.className = isErr ? 'bubble err-bub' : 'bubble';
+  bub.textContent = (isErr ? '⚠️ ' : '') + text;
+
+  col.appendChild(bub);
+
+  if (role === 'assistant' && !isErr) {
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.textContent = new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+    if (intent && intent !== 'unknown') {
+      const badge = document.createElement('span');
+      badge.className = 'intent-badge intent-' + intent;
+      badge.textContent = intent;
+      meta.appendChild(badge);
+    }
+    col.appendChild(meta);
+  }
+
+  if (role === 'user') { row.appendChild(col); row.appendChild(av); }
+  else                  { row.appendChild(av);  row.appendChild(col); }
+
+  msgEl.appendChild(row);
+  scrollDown(true);
+}
+
+/* ── Typing indicator ── */
+function showTyping() {
+  const row = document.createElement('div');
+  row.id = 'typing-row';
+  row.className = 'typing-row';
+  row.innerHTML = '<div class="msg-av" style="background:linear-gradient(135deg,#7c6ef7,#b06ef7)">🤖</div>'
+    + '<div class="typing-bub"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
+  msgEl.appendChild(row);
+  scrollDown(true);
+}
+function hideTyping() { const el=$('typing-row'); if(el) el.remove(); }
+
+/* ── Send ── */
+async function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || State.isLoading) return;
+
+  removeWelcome();
+  appendMsg('user', text, null, false);
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+  syncBtn();
+  setLoading(true);
+  showTyping();
+
+  try {
+    const data = await API.send(text);
+    if (data.session_id && data.session_id !== State.sessionId) {
+      State.sessionId = data.session_id;
+      localStorage.setItem('sa_session_id', data.session_id);
+    }
+    hideTyping();
+    appendMsg('assistant', data.answer, data.intent, false);
+  } catch (err) {
+    hideTyping();
+    const hint = /ollama|cannot reach|ai model/i.test(err.message)
+      ? err.message + '\n\nFix: ollama serve\n      ollama pull llama3'
+      : err.message;
+    appendMsg('assistant', hint, null, true);
+    setStatus('err', 'Error');
+  } finally {
+    setLoading(false);
+    inputEl.focus();
+  }
+}
+
+/* ── New chat ── */
+async function newChat() {
+  if (State.sessionId) { try { await API.reset(State.sessionId); } catch(_){} }
+  State.sessionId = null;
+  localStorage.removeItem('sa_session_id');
+  setStatus('', 'Ready');
+  msgEl.innerHTML = `
+    <div id="welcome" style="display:flex;flex-direction:column;align-items:center;
+      justify-content:center;flex:1;text-align:center;gap:12px;padding:40px 16px;animation:fadein .4s ease">
+      <div class="wlc-icon">✨</div>
+      <h3>How can I help you today?</h3>
+      <p style="font-size:14px;color:var(--muted);max-width:360px;line-height:1.65">
+        Ask about products, sizing, returns, shipping — anything about the store.</p>
+      <div class="suggestions">
+        <button class="sug-btn" onclick="fillSuggestion(this)">Show me black dresses under $60</button>
+        <button class="sug-btn" onclick="fillSuggestion(this)">What's your return policy?</button>
+        <button class="sug-btn" onclick="fillSuggestion(this)">Find a summer jacket and tell me shipping times</button>
+        <button class="sug-btn" onclick="fillSuggestion(this)">Do you have women's jeans in size 28?</button>
+        <button class="sug-btn" onclick="fillSuggestion(this)">What sizes does the yoga leggings come in?</button>
+        <button class="sug-btn" onclick="fillSuggestion(this)">How do I exchange an item?</button>
+      </div>
+    </div>`;
+}
+
+/* ── Load history on open ── */
+async function loadHistory() {
+  if (!State.sessionId) return;
+  try {
+    const msgs = await API.history(State.sessionId);
+    if (!msgs.length) return;
+    removeWelcome();
+    msgs.forEach(m => appendMsg(m.role, m.content, m.role==='assistant'?m.intent:null, false));
+    scrollDown(false);
+  } catch(_) {}
+}
+
+/* ── Input events ── */
+function onInputChange() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 130) + 'px';
+  syncBtn();
+}
+function onKeyDown(e) {
+  if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); if(!sendBtn.disabled) sendMessage(); }
+}
+function fillSuggestion(btn) {
+  inputEl.value = btn.textContent.trim();
+  onInputChange();
+  sendMessage();
+}
+
+$('new-chat-btn').addEventListener('click', newChat);
+
+/* ── CSRF ── */
+function csrf() {
+  const m = document.cookie.match(/(^|;\s*)csrftoken=([^;]*)/);
+  return m ? decodeURIComponent(m[2]) : '';
+}
+
+/* ── Boot ── */
+loadHistory();
+</script>
+</body>
+</html>
