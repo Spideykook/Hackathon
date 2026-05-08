@@ -75,6 +75,7 @@ class ChatView(APIView):
             logger.exception(f"Unhandled ChatView error: {e}")
             return Response({"error": "Unexpected error. Please try again."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+        pi = resp.parsed_intent
         return Response({
             "answer":                resp.answer,
             "intent":                resp.intent,
@@ -82,6 +83,14 @@ class ChatView(APIView):
             "retrieved_products":    resp.retrieved_product_ids,
             "retrieved_support_ids": resp.retrieved_support_ids,
             "latency_ms":            resp.latency_ms,
+            # Tradeoff data lets the frontend render a "we noticed you're weighing X vs Y" card
+            "tradeoff":              pi.tradeoff if pi else None,
+            "filters_applied": {
+                "max_price": pi.max_price if pi else None,
+                "min_price": pi.min_price if pi else None,
+                "colors":    pi.preferred_colors if pi else [],
+                "sizes":     pi.preferred_sizes  if pi else [],
+            },
         })
 
 

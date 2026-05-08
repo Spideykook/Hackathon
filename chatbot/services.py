@@ -60,6 +60,18 @@ class ChatResponse:
     retrieved_product_ids: list
     retrieved_support_ids: list
     latency_ms:            int
+    parsed_intent:         "ParsedIntent" = None   # surfaced for API response + debugging
+@dataclass
+class ParsedIntent:
+    """Structured result from the tradeoff parser. Always has a valid value — 
+    the LLM path fills it from JSON, the fallback path fills it from regexes."""
+    raw_intent:       str   = "product"   # product | support | hybrid
+    max_price:        float = None        # e.g. 50.0 from "under $50"
+    min_price:        float = None        # e.g. 20.0 from "at least $20"
+    tradeoff:         str   = None        # "price_vs_quality" | "style_vs_comfort" | None
+    preferred_colors: list  = field(default_factory=list)
+    preferred_sizes:  list  = field(default_factory=list)
+    keywords:         list  = field(default_factory=list)
 
 
 # ── 1. Query Router ───────────────────────────────────────────────────────────
@@ -114,7 +126,144 @@ class QueryRouter:
         except Exception as e:
             logger.warning(f"Embedding tiebreak skipped: {e}")
         return "product"
+# ── 1b. Tradeoff Parser ───────────────────────────────────────────────────────
 
+# Prompt asking the LLM to return ONLY JSON — no prose, no markdown fences.
+# Keeping it terse reduces token count and hallucination surface area.
+_INTENT_PARSE_PROMPT = """\
+You are a query-understanding module. Extract structured shopping intent from the user query.
+Return ONLY a valid JSON object with these exact keys:
+  raw_intent        : "product" | "support" | "hybrid"
+  max_price         : number or null
+  min_price         : number or null
+  tradeoff          : "price_vs_quality" | "style_vs_comfort" | "brand_vs_price" | null
+  preferred_colors  : list of strings (empty list if none)
+  preferred_sizes   : list of strings (empty list if none)
+  keywords          : list of 1-4 key product descriptors
+
+User query: {query}
+"""
+
+# Known sizes — used by the deterministic fallback so we don't miss e.g. "XL"
+_SIZE_TOKENS = {"xs", "s", "m", "l", "xl", "xxl", "2xl", "3xl",
+                "6", "7", "8", "9", "10", "11", "12", "28", "30", "32", "34", "36"}
+_COLOR_TOKENS = {
+    "red", "blue", "green", "black", "white", "grey", "gray", "pink",
+    "yellow", "purple", "orange", "brown", "beige", "navy", "cream", "teal",
+}
+_TRADEOFF_SIGNALS = {
+    # Maps a regex pattern to a tradeoff label
+    r"\b(cheap|budget|affordable|low.?price)\b.{0,30}\b(quality|good|best|premium)\b": "price_vs_quality",
+    r"\b(quality|good|best|premium)\b.{0,30}\b(cheap|budget|affordable|low.?price)\b": "price_vs_quality",
+    r"\b(style|stylish|trendy|fashion)\b.{0,30}\b(comfort|comfortable|cozy|soft)\b":   "style_vs_comfort",
+    r"\b(comfort|comfortable|cozy|soft)\b.{0,30}\b(style|stylish|trendy|fashion)\b":   "style_vs_comfort",
+    r"\b(brand|designer|name.?brand)\b.{0,30}\b(price|cost|budget|cheap)\b":           "brand_vs_price",
+    r"\b(price|cost|budget|cheap)\b.{0,30}\b(brand|designer|name.?brand)\b":           "brand_vs_price",
+}
+
+
+class TradeoffParser:
+    """
+    Parses user queries into structured ParsedIntent objects.
+
+    Strategy:
+      1. Ask the LLM to return JSON (fast, low-token call — temp=0 for determinism).
+      2. If JSON parsing fails for ANY reason, fall through to _keyword_fallback().
+         The fallback is pure regex/string logic — it NEVER calls the LLM again,
+         so a broken or slow Ollama doesn't block the main response.
+    """
+
+    def __init__(self, llm_client: "OllamaClient"):
+        # Same client used by ChatEngine — no second connection needed
+        self._llm = llm_client
+
+    def parse(self, query: str) -> ParsedIntent:
+        try:
+            raw = self._llm.generate(
+                messages=[{"role": "user", "content": _INTENT_PARSE_PROMPT.format(query=query)}],
+                temperature=0.0,   # zero temp = most deterministic JSON output
+            )
+            return self._parse_json(raw, query)
+        except Exception as e:
+            # LLM down, timeout, or bad JSON — degrade silently to keyword extraction
+            logger.warning(f"TradeoffParser LLM call failed ({type(e).__name__}), using keyword fallback: {e}")
+            return self._keyword_fallback(query)
+
+    def _parse_json(self, raw: str, query: str) -> ParsedIntent:
+        # Strip markdown code fences the model sometimes adds despite instructions
+        cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
+
+        # Find the first {...} block — guards against preamble text leaking in
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if not match:
+            raise ValueError("No JSON object found in LLM output")
+
+        try:
+            data = json.loads(match.group())
+        except json.JSONDecodeError as e:
+            raise ValueError(f"JSON decode failed: {e}")
+
+        # Validate field types defensively — a hallucinated string for max_price
+        # would cause a float() crash later during product filtering.
+        def _safe_float(val) -> float:
+            try:
+                return float(val) if val is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        return ParsedIntent(
+            raw_intent       = str(data.get("raw_intent", "product")),
+            max_price        = _safe_float(data.get("max_price")),
+            min_price        = _safe_float(data.get("min_price")),
+            tradeoff         = data.get("tradeoff") or None,
+            preferred_colors = [str(c).lower() for c in data.get("preferred_colors", []) if c],
+            preferred_sizes  = [str(s).upper() for s in data.get("preferred_sizes",  []) if s],
+            keywords         = [str(k)         for k in data.get("keywords",         []) if k],
+        )
+
+    def _keyword_fallback(self, query: str) -> ParsedIntent:
+        """
+        Pure deterministic extraction — regex only, no LLM.
+        Runs in <1ms. This is the safety net, not the happy path.
+        """
+        q = query.lower()
+        tokens = set(re.findall(r"\b\w+\b", q))
+
+        # Price extraction: "under $50", "below 80", "less than $30", "at least $20"
+        max_price = None
+        min_price = None
+        m = re.search(r"\b(?:under|below|less than|max|maximum|up to)\s*\$?\s*(\d+(?:\.\d+)?)", q)
+        if m:
+            max_price = float(m.group(1))
+        m = re.search(r"\b(?:at least|over|above|min|minimum|more than)\s*\$?\s*(\d+(?:\.\d+)?)", q)
+        if m:
+            min_price = float(m.group(1))
+
+        # Tradeoff detection: scan the query against known signal pairs
+        tradeoff = None
+        for pattern, label in _TRADEOFF_SIGNALS.items():
+            if re.search(pattern, q):
+                tradeoff = label
+                break
+
+        colors = sorted(tokens & _COLOR_TOKENS)
+        sizes  = sorted({t.upper() for t in tokens if t in _SIZE_TOKENS})
+
+        # Keywords: strip stop words and price/size tokens, take up to 4
+        stop = {"a", "an", "the", "i", "me", "my", "want", "need", "looking",
+                "for", "find", "show", "get", "some", "any", "please", "can", "you"}
+        kw = [t for t in re.findall(r"\b[a-z]{3,}\b", q)
+              if t not in stop and t not in _COLOR_TOKENS and t not in _SIZE_TOKENS][:4]
+
+        return ParsedIntent(
+            raw_intent       = "product",   # fallback assumes product search
+            max_price        = max_price,
+            min_price        = min_price,
+            tradeoff         = tradeoff,
+            preferred_colors = colors,
+            preferred_sizes  = sizes,
+            keywords         = kw,
+        )
 
 # ── 2. Prompt Builder ─────────────────────────────────────────────────────────
 
@@ -127,14 +276,26 @@ class PromptBuilder:
         "never invent products or policies. Be concise and warm."
     )
 
-    def build_messages(self, query: str, retrieval: RetrievalResult, history: list) -> list:
+    def build_messages(self, query: str, retrieval: RetrievalResult,
+                       history: list, parsed: ParsedIntent = None) -> list:
         msgs = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         for msg in history[-(MAX_HISTORY_TURNS * 2):]:
             msgs.append({"role": msg.role, "content": msg.content})
         ctx = self._build_context(retrieval)
-        msgs.append({"role": "user", "content": f"Context:\n{ctx}\n\nCustomer question: {query}"})
+        # Inject tradeoff context so the LLM explicitly acknowledges the user's tension
+        # rather than just picking the cheapest or first result.
+        tradeoff_hint = ""
+        if parsed and parsed.tradeoff:
+            labels = {
+                "price_vs_quality": "The user is weighing price against quality. Acknowledge this tradeoff and explain your recommendation.",
+                "style_vs_comfort": "The user is weighing style against comfort. Address both dimensions.",
+                "brand_vs_price":   "The user is deciding between a trusted brand and a lower price. Help them reason through it.",
+            }
+            hint = labels.get(parsed.tradeoff, "")
+            if hint:
+                tradeoff_hint = f"\n[TRADEOFF DETECTED: {hint}]"
+        msgs.append({"role": "user", "content": f"Context:\n{ctx}{tradeoff_hint}\n\nCustomer question: {query}"})
         return msgs
-
     def _build_context(self, r: RetrievalResult) -> str:
         sections = []
         if r.products:
@@ -267,15 +428,25 @@ class ChatEngine:
         self.router         = QueryRouter()
         self.prompt_builder = PromptBuilder()
         self.llm            = OllamaClient()
+        # Parser is wired after llm so it can reuse the same client instance
+        self.tradeoff_parser = TradeoffParser(self.llm)
 
     def respond(self, query: str, session_id: str) -> ChatResponse:
         t0 = time.time()
         conv, _  = Conversation.objects.get_or_create(session_id=session_id)
         history  = list(conv.messages.order_by("created_at"))
-        intent   = self.router.route(query)
-        logger.debug(f"[{session_id[:8]}] intent={intent} | q={query[:70]}")
-        retrieval = self._retrieve(query, intent)
-        messages  = self.prompt_builder.build_messages(query, retrieval, history)
+        intent        = self.router.route(query)
+        parsed        = self.tradeoff_parser.parse(query)
+        # Prefer the richer LLM-parsed intent when it disagrees with the keyword router,
+        # but only for product/hybrid — the keyword router is more reliable for support.
+        if parsed.raw_intent in ("product", "hybrid") and intent == "product":
+            intent = parsed.raw_intent
+        logger.debug(
+            f"[{session_id[:8]}] intent={intent} | tradeoff={parsed.tradeoff} "
+            f"| price=({parsed.min_price},{parsed.max_price}) | q={query[:60]}"
+        )
+        retrieval = self._retrieve(query, intent, parsed)
+        messages  = self.prompt_builder.build_messages(query, retrieval, history, parsed)
         answer    = self.llm.generate(messages)
         latency   = int((time.time() - t0) * 1000)
         pids = [p["db_id"] for p in retrieval.products]
@@ -288,14 +459,29 @@ class ChatEngine:
         logger.info(f"[{session_id[:8]}] {latency}ms | intent={intent}")
         return ChatResponse(answer=answer, intent=intent,
                             retrieved_product_ids=pids, retrieved_support_ids=sids,
-                            latency_ms=latency)
+                            latency_ms=latency, parsed_intent=parsed)
 
-    def _retrieve(self, query: str, intent: str) -> RetrievalResult:
+    def _retrieve(self, query: str, intent: str, parsed: ParsedIntent = None) -> RetrievalResult:
         result = RetrievalResult(intent=intent)
         try:
             mgr = get_index_manager()
             if intent in ("product", "hybrid"):
-                result.products = mgr.search_products(query, k=MAX_PRODUCT_RESULTS)
+                products = mgr.search_products(query, k=MAX_PRODUCT_RESULTS)
+                # Apply deterministic price/size filters from ParsedIntent.
+                # Doing this in Python (not in the prompt) keeps filtering exact and auditable.
+                if parsed:
+                    if parsed.max_price is not None:
+                        products = [p for p in products if p["price"] <= parsed.max_price]
+                    if parsed.min_price is not None:
+                        products = [p for p in products if p["price"] >= parsed.min_price]
+                    if parsed.preferred_sizes:
+                        # Soft filter: keep items that have at least one requested size
+                        sized = [p for p in products if any(s in p.get("sizes", []) for s in parsed.preferred_sizes)]
+                        products = sized if sized else products  # don't hard-fail if no match
+                    if parsed.preferred_colors:
+                        colored = [p for p in products if any(c in [x.lower() for x in p.get("colors", [])] for c in parsed.preferred_colors)]
+                        products = colored if colored else products
+                result.products = products
             if intent in ("support", "hybrid"):
                 result.support_docs = mgr.search_support(query, k=MAX_SUPPORT_RESULTS)
             if intent == "hybrid" and len(result.products) > 3:
