@@ -16,9 +16,9 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from django.views.generic import TemplateView
-
 from .services import get_chat_engine
 from .models import Conversation, Message
+from products.models import Product
 
 logger = logging.getLogger(__name__)
 
@@ -75,21 +75,33 @@ class ChatView(APIView):
             logger.exception(f"Unhandled ChatView error: {e}")
             return Response({"error": "Unexpected error. Please try again."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        pi = resp.parsed_intent
+        pi   = resp.parsed_intent
+        cart = conv_obj.get_cart() if hasattr(resp, "_conv") else {}
+        # Re-fetch cart from DB for the response — conv object lives in ChatEngine
+        try:
+            conv_obj = Conversation.objects.get(session_id=session_id)
+            cart     = conv_obj.get_cart()
+        except Conversation.DoesNotExist:
+            cart = {}
+
         return Response({
-            "answer":                resp.answer,
-            "intent":                resp.intent,
-            "session_id":            session_id,
-            "retrieved_products":    resp.retrieved_product_ids,
-            "retrieved_support_ids": resp.retrieved_support_ids,
-            "latency_ms":            resp.latency_ms,
-            # Tradeoff data lets the frontend render a "we noticed you're weighing X vs Y" card
-            "tradeoff":              pi.tradeoff if pi else None,
+            "answer":            resp.answer,
+            "intent":            resp.intent,
+            "session_id":        session_id,
+            "retrieved_products": resp.retrieved_product_ids,
+            "latency_ms":        resp.latency_ms,
+            "tradeoff":          pi.tradeoff if pi else None,
             "filters_applied": {
                 "max_price": pi.max_price if pi else None,
                 "min_price": pi.min_price if pi else None,
                 "colors":    pi.preferred_colors if pi else [],
                 "sizes":     pi.preferred_sizes  if pi else [],
+            },
+            "cart": {
+                "state":    cart.get("state", "BROWSING"),
+                "items":    cart.get("items", []),
+                "order_id": cart.get("order_id"),
+                "total":    round(sum(i["price"] for i in cart.get("items", [])), 2),
             },
         })
 
@@ -124,3 +136,39 @@ class ConversationResetView(APIView):
         except Conversation.DoesNotExist:
             pass
         return Response({"session_id": session_id, "messages_deleted": count})
+# ── API: GET/DELETE /api/cart/ ────────────────────────────────────────────────
+
+class CartView(APIView):
+    """
+    Read-only cart endpoint for the frontend to render the cart sidebar.
+    Cart mutation happens exclusively through the chat API — keeping a single
+    write path prevents the cart state from going out of sync.
+    """
+
+    def get(self, request):
+        session_id = _validated_session(request.query_params.get("session_id"))
+        try:
+            conv = Conversation.objects.get(session_id=session_id)
+            cart = conv.get_cart()
+        except Conversation.DoesNotExist:
+            cart = {"state": "BROWSING", "items": [], "order_id": None}
+
+        items = cart.get("items", [])
+        return Response({
+            "session_id": session_id,
+            "cart_state": cart.get("state", "BROWSING"),
+            "order_id":   cart.get("order_id"),
+            "items":      items,
+            "item_count": len(items),
+            "total":      round(sum(i["price"] for i in items), 2),
+        })
+
+    def delete(self, request):
+        """Hard-clears the cart (e.g., user clicks 'Empty Cart' button)."""
+        session_id = _validated_session(request.query_params.get("session_id"))
+        try:
+            conv = Conversation.objects.get(session_id=session_id)
+            conv.save_cart({"state": "BROWSING", "items": [], "order_id": None})
+        except Conversation.DoesNotExist:
+            pass
+        return Response({"session_id": session_id, "cart_state": "BROWSING", "items": [], "total": 0.0})
