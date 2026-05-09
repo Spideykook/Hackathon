@@ -264,6 +264,152 @@ class TradeoffParser:
             preferred_sizes  = sizes,
             keywords         = kw,
         )
+    
+# ── 1c. Checkout State Machine ────────────────────────────────────────────────
+
+_ADD_TRIGGERS = frozenset([
+    "add to cart", "add this", "add it",
+    "i'll take it", "buy this", "get this",
+    "yes", "sounds good", "take it",
+])
+
+_CONFIRM_YES = frozenset([
+    "yes", "yep", "yeah", "confirm",
+    "ok", "okay", "sure"
+])
+
+_CONFIRM_NO = frozenset([
+    "no", "cancel", "stop",
+    "never mind", "back"
+])
+
+_CHECKOUT_TRIGGERS = frozenset([
+    "checkout", "pay", "place order",
+    "buy now", "finish"
+])
+
+_CLEAR_TRIGGERS = frozenset([
+    "clear cart", "empty cart",
+    "reset cart"
+])
+
+
+class CheckoutStateMachine:
+
+    def process(self, query: str, conv, last_products: list):
+
+        cart = conv.get_cart()
+        state = cart.get("state", "BROWSING")
+
+        q = query.lower().strip()
+
+        if state == "CHECKOUT_COMPLETE":
+            return cart, "Your order has already been placed."
+
+        if any(t in q for t in _CLEAR_TRIGGERS):
+            return self._clear(conv)
+
+        if any(t in q for t in _CHECKOUT_TRIGGERS) and cart["items"]:
+            return self._complete_checkout(cart, conv)
+
+        if state == "AWAITING_CONFIRM":
+
+            if any(t in q for t in _CONFIRM_YES):
+                return self._confirm_add(cart, conv)
+
+            if any(t in q for t in _CONFIRM_NO):
+                return self._cancel_pending(cart, conv)
+
+            pending = cart.get("pending_item", {})
+            name = pending.get("name", "that item")
+
+            return cart, f"Did you want to add {name} to cart? (yes/no)"
+
+        if any(t in q for t in _ADD_TRIGGERS):
+            return self._initiate_add(cart, conv, last_products)
+
+        return cart, None
+
+    def _initiate_add(self, cart, conv, last_products):
+
+        if not last_products:
+            return cart, "Which item would you like to add?"
+
+        candidate = last_products[0]
+
+        cart["pending_item"] = {
+            "sku": candidate.get("sku", "UNKNOWN"),
+            "name": candidate.get("name", "Unknown Product"),
+            "price": candidate.get("price", 0.0),
+        }
+
+        cart["state"] = "AWAITING_CONFIRM"
+
+        conv.save_cart(cart)
+
+        return cart, (
+            f"Add {candidate.get('name')} "
+            f"(${candidate.get('price', 0.0):.2f}) to cart? (yes/no)"
+        )
+
+    def _confirm_add(self, cart, conv):
+
+        item = cart.pop("pending_item", None)
+
+        if item:
+            cart["items"].append(item)
+
+        cart["state"] = "CONFIRMED"
+
+        conv.save_cart(cart)
+
+        total = sum(i["price"] for i in cart["items"])
+
+        return cart, (
+            f"Added to cart. Total: ${total:.2f}. "
+            f"Say checkout when ready."
+        )
+
+    def _cancel_pending(self, cart, conv):
+
+        cart.pop("pending_item", None)
+
+        cart["state"] = "BROWSING"
+
+        conv.save_cart(cart)
+
+        return cart, "Okay — cart unchanged."
+
+    def _complete_checkout(self, cart, conv):
+
+        import uuid as _uuid
+
+        order_id = "ORD-" + str(_uuid.uuid4()).split("-")[0].upper()
+
+        cart["state"] = "CHECKOUT_COMPLETE"
+        cart["order_id"] = order_id
+
+        conv.save_cart(cart)
+
+        total = sum(i["price"] for i in cart["items"])
+
+        return cart, (
+            f"Order placed successfully. "
+            f"Order ID: {order_id}. "
+            f"Total: ${total:.2f}"
+        )
+
+    def _clear(self, conv):
+
+        fresh = {
+            "state": "BROWSING",
+            "items": [],
+            "order_id": None
+        }
+
+        conv.save_cart(fresh)
+
+        return fresh, "Cart cleared."    
 
 # ── 2. Prompt Builder ─────────────────────────────────────────────────────────
 
@@ -430,6 +576,7 @@ class ChatEngine:
         self.llm            = OllamaClient()
         # Parser is wired after llm so it can reuse the same client instance
         self.tradeoff_parser = TradeoffParser(self.llm)
+        self.checkout_sm = CheckoutStateMachine()
 
     def respond(self, query: str, session_id: str) -> ChatResponse:
         t0 = time.time()
@@ -446,16 +593,33 @@ class ChatEngine:
             f"| price=({parsed.min_price},{parsed.max_price}) | q={query[:60]}"
         )
         retrieval = self._retrieve(query, intent, parsed)
-        messages  = self.prompt_builder.build_messages(query, retrieval, history, parsed)
-        answer    = self.llm.generate(messages)
-        latency   = int((time.time() - t0) * 1000)
+
+        # ── Checkout state machine runs BEFORE the LLM ────────────────────────
+        # We pass last_products so _initiate_add() knows what was just retrieved.
+        # If the SM returns an override message, we short-circuit — no LLM call,
+        # no hallucination risk, near-zero latency for cart operations.
+        cart, override = self.checkout_sm.process(query, conv, retrieval.products)
+        if override:
+            answer  = override
+            latency = int((time.time() - t0) * 1000)
+            pids    = [p["db_id"] for p in retrieval.products]
+            sids    = [d["db_id"] for d in retrieval.support_docs]
+            Message.objects.create(conversation=conv, role="user",      content=query,  intent=intent)
+            Message.objects.create(conversation=conv, role="assistant",  content=answer, intent=intent,
+                                   retrieved_product_ids=pids, retrieved_support_ids=sids, latency_ms=latency)
+            logger.info(f"[{session_id[:8]}] cart_state={cart.get('state')} | SM override | {latency}ms")
+            return ChatResponse(answer=answer, intent=intent,
+                                retrieved_product_ids=pids, retrieved_support_ids=sids,
+                                latency_ms=latency, parsed_intent=parsed)
+        # ── Normal path: LLM generates the answer ─────────────────────────────
+        messages = self.prompt_builder.build_messages(query, retrieval, history, parsed)
+        answer   = self.llm.generate(messages)
+        latency  = int((time.time() - t0) * 1000)
         pids = [p["db_id"] for p in retrieval.products]
         sids = [d["db_id"] for d in retrieval.support_docs]
         Message.objects.create(conversation=conv, role="user",      content=query,  intent=intent)
-        Message.objects.create(
-            conversation=conv, role="assistant", content=answer, intent=intent,
-            retrieved_product_ids=pids, retrieved_support_ids=sids, latency_ms=latency,
-        )
+        Message.objects.create(conversation=conv, role="assistant", content=answer, intent=intent,
+                               retrieved_product_ids=pids, retrieved_support_ids=sids, latency_ms=latency)
         logger.info(f"[{session_id[:8]}] {latency}ms | intent={intent}")
         return ChatResponse(answer=answer, intent=intent,
                             retrieved_product_ids=pids, retrieved_support_ids=sids,
