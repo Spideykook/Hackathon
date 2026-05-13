@@ -65,3 +65,5 @@ We considered three alternatives for the frontend:
 - **Vanilla JS Fetch API with a static file**: no build step, no dependencies, reviewable in a `git diff`, loads in one HTTP request. The browser's native `fetch()` handles async cleanly with `async/await`. The only patterns we needed — appending DOM nodes, firing background requests, reading JSON — are all first-class in modern JS without a framework.
 
 We chose Vanilla JS because the complexity ceiling of this UI (one message list, one input, one cart counter) never justifies a framework. The constraint also forced cleaner separation: the `renderMarkdown()` function is 30 lines and unit-testable in isolation; a React component doing the same thing would be entangled with hooks and state. The background cart fetch being explicitly "not awaited" is visible and obvious in plain JS in a way that's harder to express cleanly in a React effect.
+
+We considered integrating the live Shopify Admin API, as stated in the document, but chose to use local synthetic data to guarantee uptime, lower latency, and focus strictly on the AI/deterministic boundary.
