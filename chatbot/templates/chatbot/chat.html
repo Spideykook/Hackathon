@@ -123,6 +123,28 @@ kbd{background:var(--surface);border:1px solid var(--border);border-radius:4px;
   .msg-col{max-width:86%}
   .hdr-info{display:none}
 }
+/* Tradeoff badge — injected above bot bubble when backend detects a tradeoff */
+.tradeoff-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #c084fc;
+  background: rgba(192,132,252,.1);
+  border: 1px solid rgba(192,132,252,.25);
+  border-radius: 20px;
+  padding: 3px 10px;
+  margin-bottom: 5px;
+  letter-spacing: .3px;
+  animation: fadein .3s ease;
+}
+/* Cart counter pulse on update */
+@keyframes cart-pulse {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.12); }
+  100% { transform: scale(1); }
+}
+.cart-pulse { animation: cart-pulse .35s ease; }
 </style>
 </head>
 <body>
@@ -132,13 +154,14 @@ kbd{background:var(--surface);border:1px solid var(--border);border-radius:4px;
     <div class="hdr-logo">🛍️</div>
     <div class="hdr-info">
       <h2>Shopping Assistant</h2>
-      <span>Llama 3 · RAG · FAISS</span>
+      <span>Made to make shopping easier</span>
     </div>
     <div class="status-pill" id="status-pill">
       <div class="status-dot"></div>
       <span id="status-text">Ready</span>
     </div>
     <div class="hdr-actions">
+      <!-- <button class="hdr-btn" id="cart-counter">🛒 Cart</button> -->
       <button class="hdr-btn" id="new-chat-btn">↺ New Chat</button>
       <a href="/" class="hdr-btn">← Home</a>
     </div>
@@ -163,9 +186,8 @@ kbd{background:var(--surface);border:1px solid var(--border);border-radius:4px;
   <div id="input-area">
     <div id="input-row">
       <textarea id="msg-input" rows="1"
-        placeholder="Ask about products, returns, shipping…"
-        oninput="onInputChange()" onkeydown="onKeyDown(event)"></textarea>
-      <button id="send-btn" disabled onclick="sendMessage()">
+        placeholder="Ask about products, returns, shipping…"></textarea>
+      <button id="send-btn" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -180,224 +202,11 @@ kbd{background:var(--surface);border:1px solid var(--border);border-radius:4px;
 
 </div>
 
-<script>
-'use strict';
 
-/* ── State ── */
-const State = {
-  sessionId: localStorage.getItem('sa_session_id') || null,
-  isLoading: false,
-};
 
-/* ── API ── */
-const API = {
-  async send(message) {
-    const body = { message };
-    if (State.sessionId) body.session_id = State.sessionId;
-    const res  = await fetch('/api/chat/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Server error ' + res.status);
-    return data;
-  },
-  async history(sid) {
-    const res  = await fetch('/api/chat/history/?session_id=' + sid);
-    const data = await res.json();
-    return data.messages || [];
-  },
-  async reset(sid) {
-    await fetch('/api/chat/reset/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
-      body: JSON.stringify({ session_id: sid }),
-    });
-  },
-};
+{% load static %}
+<script src="{% static 'js/chat.js' %}"></script>
 
-/* ── DOM refs ── */
-const $       = id => document.getElementById(id);
-const msgEl   = $('messages');
-const inputEl = $('msg-input');
-const sendBtn = $('send-btn');
-
-/* ── Status pill ── */
-function setStatus(cls, txt) {
-  const pill = $('status-pill');
-  pill.className = 'status-pill' + (cls ? ' ' + cls : '');
-  $('status-text').textContent = txt;
-}
-
-/* ── Loading state ── */
-function setLoading(v) {
-  State.isLoading = v;
-  inputEl.disabled = v;
-  syncBtn();
-  if (v) setStatus('loading', 'Thinking…');
-  else   setStatus('', 'Ready');
-}
-function syncBtn() {
-  sendBtn.disabled = State.isLoading || !inputEl.value.trim();
-}
-
-/* ── Scroll ── */
-function scrollDown(smooth) {
-  msgEl.scrollTo({ top: msgEl.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
-}
-
-/* ── Remove welcome screen ── */
-function removeWelcome() {
-  const w = $('welcome');
-  if (w) w.remove();
-}
-
-/* ── Append message ── */
-function appendMsg(role, text, intent, isErr) {
-  const row = document.createElement('div');
-  row.className = 'msg-row ' + role;
-
-  const av = document.createElement('div');
-  av.className = 'msg-av';
-  av.textContent = role === 'user' ? '👤' : '🤖';
-
-  const col = document.createElement('div');
-  col.className = 'msg-col';
-
-  const bub = document.createElement('div');
-  bub.className = isErr ? 'bubble err-bub' : 'bubble';
-  bub.textContent = (isErr ? '⚠️ ' : '') + text;
-
-  col.appendChild(bub);
-
-  if (role === 'assistant' && !isErr) {
-    const meta = document.createElement('div');
-    meta.className = 'msg-meta';
-    meta.textContent = new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
-    if (intent && intent !== 'unknown') {
-      const badge = document.createElement('span');
-      badge.className = 'intent-badge intent-' + intent;
-      badge.textContent = intent;
-      meta.appendChild(badge);
-    }
-    col.appendChild(meta);
-  }
-
-  if (role === 'user') { row.appendChild(col); row.appendChild(av); }
-  else                  { row.appendChild(av);  row.appendChild(col); }
-
-  msgEl.appendChild(row);
-  scrollDown(true);
-}
-
-/* ── Typing indicator ── */
-function showTyping() {
-  const row = document.createElement('div');
-  row.id = 'typing-row';
-  row.className = 'typing-row';
-  row.innerHTML = '<div class="msg-av" style="background:linear-gradient(135deg,#7c6ef7,#b06ef7)">🤖</div>'
-    + '<div class="typing-bub"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
-  msgEl.appendChild(row);
-  scrollDown(true);
-}
-function hideTyping() { const el=$('typing-row'); if(el) el.remove(); }
-
-/* ── Send ── */
-async function sendMessage() {
-  const text = inputEl.value.trim();
-  if (!text || State.isLoading) return;
-
-  removeWelcome();
-  appendMsg('user', text, null, false);
-  inputEl.value = '';
-  inputEl.style.height = 'auto';
-  syncBtn();
-  setLoading(true);
-  showTyping();
-
-  try {
-    const data = await API.send(text);
-    if (data.session_id && data.session_id !== State.sessionId) {
-      State.sessionId = data.session_id;
-      localStorage.setItem('sa_session_id', data.session_id);
-    }
-    hideTyping();
-    appendMsg('assistant', data.answer, data.intent, false);
-  } catch (err) {
-    hideTyping();
-    const hint = /ollama|cannot reach|ai model/i.test(err.message)
-      ? err.message + '\n\nFix: ollama serve\n      ollama pull llama3'
-      : err.message;
-    appendMsg('assistant', hint, null, true);
-    setStatus('err', 'Error');
-  } finally {
-    setLoading(false);
-    inputEl.focus();
-  }
-}
-
-/* ── New chat ── */
-async function newChat() {
-  if (State.sessionId) { try { await API.reset(State.sessionId); } catch(_){} }
-  State.sessionId = null;
-  localStorage.removeItem('sa_session_id');
-  setStatus('', 'Ready');
-  msgEl.innerHTML = `
-    <div id="welcome" style="display:flex;flex-direction:column;align-items:center;
-      justify-content:center;flex:1;text-align:center;gap:12px;padding:40px 16px;animation:fadein .4s ease">
-      <div class="wlc-icon">✨</div>
-      <h3>How can I help you today?</h3>
-      <p style="font-size:14px;color:var(--muted);max-width:360px;line-height:1.65">
-        Ask about products, sizing, returns, shipping — anything about the store.</p>
-      <div class="suggestions">
-        <button class="sug-btn" onclick="fillSuggestion(this)">Show me black dresses under $60</button>
-        <button class="sug-btn" onclick="fillSuggestion(this)">What's your return policy?</button>
-        <button class="sug-btn" onclick="fillSuggestion(this)">Find a summer jacket and tell me shipping times</button>
-        <button class="sug-btn" onclick="fillSuggestion(this)">Do you have women's jeans in size 28?</button>
-        <button class="sug-btn" onclick="fillSuggestion(this)">What sizes does the yoga leggings come in?</button>
-        <button class="sug-btn" onclick="fillSuggestion(this)">How do I exchange an item?</button>
-      </div>
-    </div>`;
-}
-
-/* ── Load history on open ── */
-async function loadHistory() {
-  if (!State.sessionId) return;
-  try {
-    const msgs = await API.history(State.sessionId);
-    if (!msgs.length) return;
-    removeWelcome();
-    msgs.forEach(m => appendMsg(m.role, m.content, m.role==='assistant'?m.intent:null, false));
-    scrollDown(false);
-  } catch(_) {}
-}
-
-/* ── Input events ── */
-function onInputChange() {
-  inputEl.style.height = 'auto';
-  inputEl.style.height = Math.min(inputEl.scrollHeight, 130) + 'px';
-  syncBtn();
-}
-function onKeyDown(e) {
-  if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); if(!sendBtn.disabled) sendMessage(); }
-}
-function fillSuggestion(btn) {
-  inputEl.value = btn.textContent.trim();
-  onInputChange();
-  sendMessage();
-}
-
-$('new-chat-btn').addEventListener('click', newChat);
-
-/* ── CSRF ── */
-function csrf() {
-  const m = document.cookie.match(/(^|;\s*)csrftoken=([^;]*)/);
-  return m ? decodeURIComponent(m[2]) : '';
-}
-
-/* ── Boot ── */
-loadHistory();
-</script>
 </body>
 </html>
+
