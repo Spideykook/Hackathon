@@ -41,7 +41,59 @@ JSON response: answer, cart, tradeoff, filters_applied
 - **PostgreSQL / SQLite** — `Conversation` and `Message` models; `Conversation.metadata` is a JSONField used for cart state
 
 ---
+## Decoupled Async Frontend
 
+The UI is a single HTML file backed by an external `chatbot/static/js/chat.js`. All JS was extracted from an inline `<script>` block into a static file for two reasons: it makes the code reviewable in a `git diff`, and it enforces a clean separation between markup and behaviour.
+
+**No framework. No build step.** Pure Vanilla JS with the Fetch API. The only Django template tag used is `{% static %}` to resolve the script path.
+
+
+### Fetch flow
+User hits Enter
+│
+▼
+appendMsg('user', text)        — DOM updated immediately, before fetch
+showTyping()                   — three-dot indicator appears
+│
+▼
+fetch('/api/chat/', { method: 'POST', body: JSON.stringify({message, session_id}) })
+│
+┌───┴──────────────────────┐
+│ res.ok?                  │
+│  yes → hideTyping()      │  no → throw new Error(res.status)
+│         appendMsg(bot)   │
+│         refreshCartUI()  │         ↓
+│  (not awaited)           │  catch() → appendMsg('assistant', msg, isErr=true)
+└──────────────────────────┘         setStatus('err', 'Error')
+
+### Background cart sync
+
+`refreshCartUI(sessionId)` is called after every successful response but is **not awaited**. It calls `API.fetchCart()`, which wraps its own `fetch` in a `try/catch` that returns `null` on any failure. The calling code checks `if (!cart) return` and exits silently. This is an intentional one-way degradation path — cart state is supplementary UI and must never propagate errors into the chat flow.
+
+### Markdown renderer
+
+A custom `renderMarkdown()` function handles the three patterns our LLM actually produces:
+
+- `**bold**` → `<strong>`
+- `` `inline code` `` → `<code>` with inline styles
+- Lines starting with `- ` or `* ` → `<ul>/<li>`
+
+Everything else is rendered as escaped plain text. We do not use `marked.js` or any external parser — the attack surface for a markdown parser on LLM output is small enough that a 30-line custom function covers it without a dependency.
+
+**XSS boundary:** User input is always written via `textContent`. The LLM answer is the only string that goes through `innerHTML` after `renderMarkdown()`. This is acceptable because the answer has already been validated by `HallucinationGuard` server-side before it reaches the client.
+
+### Tradeoff badge
+
+The `tradeoff` field from the API response is mapped to a human-readable label in a `TRADEOFF_LABELS` dictionary in `chat.js`. A `<div class="tradeoff-badge">` is injected above the assistant's bubble by `appendMsg()` — it is not part of the LLM's answer string, so it's always correctly formatted regardless of what the model outputs.
+
+### Error handling
+
+Two error classes are distinguished in the `catch()` block:
+
+- `TypeError` with `message.includes('fetch')` — network-level failure (no connection, DNS failure). Message: *"Network error — could not reach the server."*
+- Any other `Error` — server returned non-2xx. The `res.json()` error body is used if available, otherwise `res.status`.
+
+Both render as a red `err-bub` bubble in the conversation. `setStatus('err', 'Error')` updates the header pill. Neither uses `alert()` or `console.error` as the primary user signal.
 ## The AI / Deterministic Boundary
 
 This is the most deliberate design decision in the codebase. The boundary was drawn at the point where correctness matters more than flexibility.

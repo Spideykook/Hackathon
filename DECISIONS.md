@@ -52,3 +52,16 @@ We considered building a disambiguation flow — when a user says "add this one"
 We chose picking the first retrieved product as the `pending_item` candidate when the user signals an add-to-cart intent.
 
 Because the confirmation step (`"Add X for $Y? yes/no"`) already gives the user an explicit veto before anything is committed. If the wrong product is selected, the user says "no" and the pending item is cleared — they're back to BROWSING with zero items added. The cost of getting the candidate wrong is a single confirmation round-trip, not a committed purchase. A full disambiguation UI is the right long-term answer, but for a single-session demo where retrieval results are ranked by relevance, first-result selection is correct often enough that the confirmation gate handles the edge cases.
+---
+
+**Decision 6: Vanilla JS Fetch API over React, a UI framework, or Django form submission**
+
+We considered three alternatives for the frontend:
+
+- **Standard Django form submission** (`<form method="POST">`): simple, zero JS required, but causes a full page reload on every message. A page reload resets scroll position, flashes the UI, and destroys the "conversation" mental model entirely. Unacceptable for a chat interface.
+
+- **React (or Vue/Svelte)**: component model would be clean, but introduces a build pipeline (Vite/webpack), `node_modules`, and a separate compilation step. For a hackathon with a single chat view, the overhead is disproportionate. Judges reviewing the repo would also see a `package.json` with 800 transitive dependencies, which works against the "pragmatic engineering" signal we want to send.
+
+- **Vanilla JS Fetch API with a static file**: no build step, no dependencies, reviewable in a `git diff`, loads in one HTTP request. The browser's native `fetch()` handles async cleanly with `async/await`. The only patterns we needed — appending DOM nodes, firing background requests, reading JSON — are all first-class in modern JS without a framework.
+
+We chose Vanilla JS because the complexity ceiling of this UI (one message list, one input, one cart counter) never justifies a framework. The constraint also forced cleaner separation: the `renderMarkdown()` function is 30 lines and unit-testable in isolation; a React component doing the same thing would be entangled with hooks and state. The background cart fetch being explicitly "not awaited" is visible and obvious in plain JS in a way that's harder to express cleanly in a React effect.

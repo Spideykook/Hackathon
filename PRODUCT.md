@@ -66,3 +66,21 @@ When a tradeoff is detected, two things happen:
 2. **The LLM receives an explicit instruction.** A tradeoff hint is injected into the prompt: `"The user is weighing price against quality. Acknowledge this tradeoff and explain your recommendation."` This prevents the LLM from defaulting to the cheapest or first option without comment.
 
 The detection is purely regex-based and runs in the keyword fallback path if the LLM intent parse fails — so tradeoff awareness degrades gracefully even when Ollama is down.
+
+---
+
+## Frontend Experience
+
+The chat UI is a single-page interface — no page reloads, no form submissions. Four specific decisions shape what the user sees:
+
+**Immediate message rendering.** The user's message appears in the DOM the moment they hit Enter, before the fetch has been made. This removes the dead-click feeling of traditional form submission. The "Agent is thinking…" typing indicator (three animated dots) appears simultaneously, giving the user a clear signal that the request is in flight.
+
+**Silent cart updates.** After every chat response, a background `fetch()` call hits `/api/cart/` and updates the cart counter in the header (`🛒 2 · $89.98`). This fires without being awaited — it cannot block or error the chat flow. If the cart fetch fails (network blip, server timeout), the counter simply doesn't update. The user never sees an error for a supplementary UI element.
+
+**The Tradeoff Badge.** When the backend's `TradeoffParser` detects a tradeoff in the user's query, the API response includes a `tradeoff` field (e.g., `"price_vs_quality"`). The frontend renders a small badge directly above the assistant's message bubble:
+
+> ⚖️ Balancing Price vs. Quality
+
+This makes the agent's reasoning visible. The user can see it registered the tension in their request rather than silently picking the cheapest option. The badge is injected via JavaScript — it's not part of the LLM's answer text, so it's always well-formatted and never hallucinated.
+
+**Network error in chat, not in the console.** If the `fetch()` to `/api/chat/` fails (connection drop, server restart), the error surfaces as a red message bubble inside the conversation — the same visual channel the user is already looking at. There's no `alert()`, no silent failure, no redirect to an error page.
