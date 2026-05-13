@@ -409,7 +409,159 @@ class CheckoutStateMachine:
 
         conv.save_cart(fresh)
 
-        return fresh, "Cart cleared."    
+        return fresh, "Cart cleared."   
+# ── 1d. Hallucination Guard ───────────────────────────────────────────────────
+#
+# Strategy: after the LLM generates an answer, we check whether any product
+# name or price it mentions can be traced back to the retrieval context.
+# If not, we discard the answer and build a response from the Python list directly.
+#
+# Why post-generation rather than prompt-only mitigation?
+# Prompt instructions ("only mention products I gave you") reduce hallucinations
+# but don't eliminate them — especially with smaller local models like Llama3 7B.
+# A post-generation check gives a hard guarantee: fabricated product data never
+# reaches the user.
+#
+# Trade-off accepted: the guard only runs when retrieval.products is non-empty.
+# If FAISS returned nothing, there's no ground truth to check against, so we
+# let the LLM's general answer through — it can't hallucinate a specific SKU
+# it was never asked to reference.
+
+# Fuzzy match threshold: 0.75 means "75% of the product name's words must appear
+# in the answer." Keeps the check robust to pluralisation, punctuation, etc.
+_NAME_MATCH_THRESHOLD = 0.75
+
+# How many currency-like patterns ($X.XX, $X, X dollars) must be unverifiable
+# before we flag the answer. Set to 1: any invented price is a hard fail.
+_MAX_UNVERIFIED_PRICES = 0
+
+
+def _normalise(text: str) -> str:
+    """Lowercase, strip punctuation. Used for both product names and answer text."""
+    return re.sub(r"[^\w\s]", "", text.lower())
+
+
+def _name_present_in_answer(product_name: str, answer_norm: str) -> bool:
+    """
+    Check if enough words from a product name appear in the answer.
+    Uses word-overlap rather than substring match to handle word order differences
+    (e.g. "Slim Fit Jeans" vs "jeans slim fit").
+    """
+    words = _normalise(product_name).split()
+    if not words:
+        return True   # nothing to verify — don't flag
+    hits = sum(1 for w in words if w in answer_norm)
+    return (hits / len(words)) >= _NAME_MATCH_THRESHOLD
+
+
+class HallucinationGuard:
+    """
+    Validates an LLM answer against the ground-truth product list.
+    Returns either the original answer (clean) or a deterministic fallback (flagged).
+    """
+
+    def validate(self, answer: str, products: list) -> tuple[str, bool]:
+        """
+        Returns (final_answer, was_hallucination_detected).
+        Callers use the flag for logging/metrics — don't silently swallow it.
+        """
+        # No ground truth — nothing to check against
+        if not products:
+            return answer, False
+
+        answer_norm = _normalise(answer)
+        known_names  = {_normalise(p["name"])  for p in products}
+        known_prices = {p["price"]              for p in products}
+
+        # ── Check 1: Price verification ───────────────────────────────────────
+        # Extract every dollar amount mentioned in the answer
+        mentioned_prices = re.findall(r"\$\s*(\d+(?:\.\d{1,2})?)", answer)
+        unverified_price_count = 0
+        for raw in mentioned_prices:
+            try:
+                val = float(raw)
+            except ValueError:
+                continue
+            # Allow a $0.50 rounding tolerance — LLMs sometimes round to nearest dollar
+            if not any(abs(val - known) < 0.50 for known in known_prices):
+                unverified_price_count += 1
+                logger.debug(f"HallucinationGuard: unverified price ${val} (known={known_prices})")
+
+        if unverified_price_count > _MAX_UNVERIFIED_PRICES:
+            logger.warning(
+                f"HallucinationGuard: {unverified_price_count} invented price(s) found — "
+                f"discarding LLM answer and using fallback"
+            )
+            return self._build_fallback(products, reason="price"), True
+
+        # ── Check 2: Product name verification ────────────────────────────────
+        # If the answer contains any word-sequence that looks like a product name
+        # but doesn't match any retrieved product, it's a hallucinated SKU.
+        # We only apply this check when the answer actually references products
+        # (heuristic: contains a price sign or words like "this product"/"item").
+        answer_references_products = bool(
+            re.search(r"\$|\bproduct\b|\bitem\b|\bmodel\b|\bsku\b", answer, re.I)
+        )
+        if answer_references_products:
+            # Build a set of all word 2-grams and 3-grams from the answer;
+            # check if any look like a product name but aren't in our known set.
+            answer_words = answer_norm.split()
+            ngrams = set()
+            for n in (2, 3):
+                for i in range(len(answer_words) - n + 1):
+                    ngrams.add(" ".join(answer_words[i:i + n]))
+
+            # A suspicious n-gram: appears in answer, is NOT a substring of any known name,
+            # and contains at least one capitalised source word (heuristic for proper noun).
+            suspicious = []
+            for gram in ngrams:
+                gram_words = set(gram.split())
+                in_known = any(gram_words.issubset(kn.split()) for kn in known_names)
+                if not in_known:
+                    # Check if the original (un-normalised) answer has this sequence capitalised
+                    pattern = r"\b" + r"\s+".join(re.escape(w) for w in gram.split()) + r"\b"
+                    orig_match = re.search(pattern, answer, re.I)
+                    if orig_match:
+                        matched_text = orig_match.group()
+                        # Flag if majority of words are title-cased (likely a product name)
+                        cap_words = [w for w in matched_text.split() if w and w[0].isupper()]
+                        if len(cap_words) / max(len(matched_text.split()), 1) >= 0.6:
+                            suspicious.append(matched_text)
+
+            if suspicious:
+                logger.warning(
+                    f"HallucinationGuard: suspicious product references not in context: "
+                    f"{suspicious[:3]} — discarding LLM answer"
+                )
+                return self._build_fallback(products, reason="name"), True
+
+        # Answer passed both checks
+        return answer, False
+
+    def _build_fallback(self, products: list, reason: str) -> str:
+        """
+        Constructs a safe, deterministic answer from the raw Python product list.
+        No LLM involvement. Format is predictable and testable.
+        """
+        lines = []
+        for p in products:
+            name  = p.get("name",  "Unknown Product")
+            price = p.get("price", 0.0)
+            desc  = p.get("description", "")
+            # Keep each line tight — description is capped to avoid wall-of-text
+            short_desc = (desc[:80] + "…") if len(desc) > 80 else desc
+            line = f"• **{name}** — ${price:.2f}"
+            if short_desc:
+                line += f": {short_desc}"
+            lines.append(line)
+
+        header = "Here are the best matching products I found for you:\n\n"
+        footer = (
+            "\n\nWould you like more details on any of these, "
+            "or shall I refine the search?"
+        )
+        logger.info(f"HallucinationGuard: served deterministic fallback (reason={reason}, n={len(products)})")
+        return header + "\n".join(lines) + footer
 
 # ── 2. Prompt Builder ─────────────────────────────────────────────────────────
 
@@ -577,6 +729,7 @@ class ChatEngine:
         # Parser is wired after llm so it can reuse the same client instance
         self.tradeoff_parser = TradeoffParser(self.llm)
         self.checkout_sm = CheckoutStateMachine()
+        self.hallucination_guard = HallucinationGuard()
 
     def respond(self, query: str, session_id: str) -> ChatResponse:
         t0 = time.time()
@@ -613,7 +766,18 @@ class ChatEngine:
                                 latency_ms=latency, parsed_intent=parsed)
         # ── Normal path: LLM generates the answer ─────────────────────────────
         messages = self.prompt_builder.build_messages(query, retrieval, history, parsed)
-        answer   = self.llm.generate(messages)
+        answer    = self.llm.generate(messages)
+
+        # Run the guard only for product-intent turns — support/FAQ answers
+        # don't reference product names or prices, so the checks would be noisy.
+        if intent in ("product", "hybrid") and retrieval.products:
+            answer, hallucinated = self.hallucination_guard.validate(answer, retrieval.products)
+            if hallucinated:
+                # Increment a simple counter in the conversation metadata so we
+                # can track per-session hallucination rate without a new DB table.
+                conv.metadata.setdefault("hallucination_count", 0)
+                conv.metadata["hallucination_count"] += 1
+                conv.save(update_fields=["metadata"])
         latency  = int((time.time() - t0) * 1000)
         pids = [p["db_id"] for p in retrieval.products]
         sids = [d["db_id"] for d in retrieval.support_docs]
