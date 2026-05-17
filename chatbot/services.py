@@ -268,10 +268,25 @@ class TradeoffParser:
 # ── 1c. Checkout State Machine ────────────────────────────────────────────────
 
 _ADD_TRIGGERS = frozenset([
-    "add to cart", "add this", "add it",
-    "i'll take it", "buy this", "get this",
-    "yes", "sounds good", "take it",
+    "add to cart", "add this", "add it", "i'll take it", "i want this",
+    "i want that", "buy this", "buy it", "get this", "get it",
+    "purchase this", "order this", "take it", "that one", "this one",
+    "add the first", "add the second", "add the third",
+    "would like to add", "like to add", "want to add",
+    "i'll get", "i'll buy", "i'll take", "put it in my cart",
+    "put this in my cart", "add it to my cart", "add to my cart",
+    "i'll take the", "i want the", "get me the", "i'd like the",
+    "i'd like to add", "id like to add",
 ])
+
+# Regex patterns that catch "[verb] [product name]" structures where the
+# user names the product directly instead of using a pronoun.
+# This is the gap the frozenset can't cover — "Black Evening Dress" has no
+# trigger word, but the intent is unambiguous when paired with a verb.
+_ADD_TRIGGER_PATTERNS = [
+    re.compile(r"\b(add|get|buy|order|take|want|purchase|i'll have)\b.{0,40}\b(dress|jeans|jacket|shirt|shoes|boot|coat|hoodie|sweater|top|skirt|legging|blazer|trouser|pant)\b", re.I),
+    re.compile(r"\b(add|get|buy|order|take|i'll have)\b.{1,50}", re.I),  # any verb + anything — last resort
+]
 
 _CONFIRM_YES = frozenset([
     "yes", "yep", "yeah", "confirm",
@@ -298,13 +313,12 @@ class CheckoutStateMachine:
 
     def process(self, query: str, conv, last_products: list):
 
-        cart = conv.get_cart()
+        cart  = conv.get_cart()
         state = cart.get("state", "BROWSING")
-
-        q = query.lower().strip()
+        q     = query.lower().strip()
 
         if state == "CHECKOUT_COMPLETE":
-            return cart, "Your order has already been placed."
+            return cart, "Your order has already been placed! Start a new session to shop again."
 
         if any(t in q for t in _CLEAR_TRIGGERS):
             return self._clear(conv)
@@ -312,44 +326,52 @@ class CheckoutStateMachine:
         if any(t in q for t in _CHECKOUT_TRIGGERS) and cart["items"]:
             return self._complete_checkout(cart, conv)
 
+    
         if state == "AWAITING_CONFIRM":
-
             if any(t in q for t in _CONFIRM_YES):
                 return self._confirm_add(cart, conv)
-
             if any(t in q for t in _CONFIRM_NO):
                 return self._cancel_pending(cart, conv)
-
             pending = cart.get("pending_item", {})
-            name = pending.get("name", "that item")
+            name    = pending.get("name", "that item")
+            return cart, f"Just to confirm — did you want to add **{name}** to your cart? (yes / no)"
 
-            return cart, f"Did you want to add {name} to cart? (yes/no)"
+    # General add-trigger — only reached if state is BROWSING or CONFIRMED
+        # Check fixed trigger phrases first (fast, exact)
+        add_detected = any(t in q for t in _ADD_TRIGGERS)
 
-        if any(t in q for t in _ADD_TRIGGERS):
-            return self._initiate_add(cart, conv, last_products)
+        # Fall through to regex patterns if no phrase matched —
+        # catches "Black Evening Dress" / "[product name]" style inputs
+        if not add_detected:
+            add_detected = any(p.search(q) for p in _ADD_TRIGGER_PATTERNS)
+
+        if add_detected:
+            return self._initiate_add(cart, conv, last_products, query)
 
         return cart, None
 
-    def _initiate_add(self, cart, conv, last_products):
-
+    def _initiate_add(self, cart, conv, last_products, query=""):
         if not last_products:
-            return cart, "Which item would you like to add?"
+            return cart, "I don't have a specific product in mind — which item would you like to add?"
 
-        candidate = last_products[0]
+        # Try to match the query to a specific product by name before defaulting
+        # to first result. Handles "I want the Black Evening Dress" correctly.
+        q_lower = query.lower()
+        candidate = next(
+            (p for p in last_products if p.get("name", "").lower() in q_lower),
+            last_products[0]  # fallback to first if no name match
+        )
 
         cart["pending_item"] = {
-            "sku": candidate.get("sku", "UNKNOWN"),
-            "name": candidate.get("name", "Unknown Product"),
+            "sku":   candidate.get("sku", "UNKNOWN"),
+            "name":  candidate.get("name", "Unknown Product"),
             "price": candidate.get("price", 0.0),
         }
-
         cart["state"] = "AWAITING_CONFIRM"
-
         conv.save_cart(cart)
-
         return cart, (
-            f"Add {candidate.get('name')} "
-            f"(${candidate.get('price', 0.0):.2f}) to cart? (yes/no)"
+            f"Add **{candidate.get('name')}** "
+            f"(${candidate.get('price', 0.0):.2f}) to your cart? (yes / no)"
         )
 
     def _confirm_add(self, cart, conv):

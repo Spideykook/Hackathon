@@ -145,6 +145,46 @@ kbd{background:var(--surface);border:1px solid var(--border);border-radius:4px;
   100% { transform: scale(1); }
 }
 .cart-pulse { animation: cart-pulse .35s ease; }
+.cart-panel {
+  position: fixed;
+  background: #1e1e2e;
+  border: 1px solid rgba(124,110,247,.3);
+  border-radius: 12px;
+  padding: 16px;
+  min-width: 260px;
+  max-width: 320px;
+  z-index: 1000;
+  box-shadow: 0 8px 32px rgba(0,0,0,.4);
+  animation: fadein .15s ease;
+}
+.cart-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  color: #ccc;
+}
+.cart-total {
+  font-size: 14px;
+  padding-top: 10px;
+  text-align: right;
+  color: #fff;
+}
+.cart-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 8px 0; }
+.cart-done  { font-size: 13px; color: #34d399; padding-top: 10px; text-align: center; }
+.cart-checkout-btn {
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px;
+  background: linear-gradient(135deg,#7c6ef7,#b06ef7);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
 </style>
 </head>
 <body>
@@ -161,7 +201,7 @@ kbd{background:var(--surface);border:1px solid var(--border);border-radius:4px;
       <span id="status-text">Ready</span>
     </div>
     <div class="hdr-actions">
-      <!-- <button class="hdr-btn" id="cart-counter">🛒 Cart</button> -->
+      <button class="hdr-btn" id="cart-counter">🛒 Cart</button> 
       <button class="hdr-btn" id="new-chat-btn">↺ New Chat</button>
       <a href="/" class="hdr-btn">← Home</a>
     </div>

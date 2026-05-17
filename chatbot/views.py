@@ -75,22 +75,22 @@ class ChatView(APIView):
             logger.exception(f"Unhandled ChatView error: {e}")
             return Response({"error": "Unexpected error. Please try again."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        pi   = resp.parsed_intent
-        cart = conv_obj.get_cart() if hasattr(resp, "_conv") else {}
-        # Re-fetch cart from DB for the response — conv object lives in ChatEngine
+        pi = resp.parsed_intent
+
+        # conv_obj MUST be fetched before use — do not reference it before this block
         try:
             conv_obj = Conversation.objects.get(session_id=session_id)
             cart     = conv_obj.get_cart()
         except Conversation.DoesNotExist:
-            cart = {}
+            cart = {"state": "BROWSING", "items": [], "order_id": None}
 
         return Response({
-            "answer":            resp.answer,
-            "intent":            resp.intent,
-            "session_id":        session_id,
+            "answer":             resp.answer,
+            "intent":             resp.intent,
+            "session_id":         session_id,
             "retrieved_products": resp.retrieved_product_ids,
-            "latency_ms":        resp.latency_ms,
-            "tradeoff":          pi.tradeoff if pi else None,
+            "latency_ms":         resp.latency_ms,
+            "tradeoff":           pi.tradeoff if pi else None,
             "filters_applied": {
                 "max_price": pi.max_price if pi else None,
                 "min_price": pi.min_price if pi else None,
@@ -129,13 +129,15 @@ class ConversationHistoryView(APIView):
 class ConversationResetView(APIView):
     def post(self, request):
         session_id = _validated_session(request.data.get("session_id"))
-        count = 0
         try:
-            conv  = Conversation.objects.get(session_id=session_id)
-            count, _ = conv.messages.all().delete()
+            conv = Conversation.objects.get(session_id=session_id)
+            conv.messages.all().delete()
+            # Clear cart state too — otherwise it bleeds into the new session
+            conv.metadata = {}
+            conv.save(update_fields=["metadata", "updated_at"])
         except Conversation.DoesNotExist:
             pass
-        return Response({"session_id": session_id, "messages_deleted": count})
+        return Response({"session_id": session_id, "cleared": True})
 # ── API: GET/DELETE /api/cart/ ────────────────────────────────────────────────
 
 class CartView(APIView):

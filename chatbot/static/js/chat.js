@@ -413,9 +413,84 @@ async function loadHistory() {
 }
 
 // Wire up events that are referenced inline in the HTML
-$('new-chat-btn').addEventListener('click', newChat);
-inputEl.addEventListener('input',   onInputChange);
-inputEl.addEventListener('keydown', onKeyDown);
-sendBtn.addEventListener('click', sendMessage);
+// 
+document.addEventListener('DOMContentLoaded', () => {
 
-loadHistory();
+  // Wire up events
+  $('new-chat-btn').addEventListener('click', newChat);
+  inputEl.addEventListener('input', onInputChange);
+  inputEl.addEventListener('keydown', onKeyDown);
+  sendBtn.addEventListener('click', sendMessage);
+
+  // Cart panel toggle
+  const cartBtn = $('cart-counter');
+
+  if (cartBtn) {
+    cartBtn.addEventListener('click', () => {
+
+      let panel = $('cart-panel');
+
+      // Toggle off
+      if (panel) {
+        panel.remove();
+        return;
+      }
+
+      panel = document.createElement('div');
+      panel.id = 'cart-panel';
+      panel.className = 'cart-panel';
+
+      API.fetchCart(State.sessionId).then(cart => {
+
+        console.log(cart);
+
+        if (!cart || !Array.isArray(cart.items) || !cart.items.length) {
+          panel.innerHTML = '<p class="cart-empty">Your cart is empty.</p>';
+        } else {
+
+          const rows = cart.items.map(i => `
+            <div class="cart-item">
+              <span>${i.name}</span>
+              <span>$${i.price.toFixed(2)}</span>
+            </div>
+          `).join('');
+
+          const total = `
+            <div class="cart-total">
+              Total: <strong>$${cart.total.toFixed(2)}</strong>
+            </div>
+          `;
+
+          const cta = cart.cart_state === 'CHECKOUT_COMPLETE'
+            ? `<div class="cart-done">✓ Order placed: ${cart.order_id}</div>`
+            : `<button class="cart-checkout-btn"
+                 onclick="document.getElementById('msg-input').value='checkout';sendMessage()">
+                 Checkout →
+               </button>`;
+
+          panel.innerHTML = rows + total + cta;
+        }
+
+      });
+
+      panel.style.top = '70px';
+      panel.style.right = '20px';
+
+      document.body.appendChild(panel);
+
+      // Close outside click
+      setTimeout(() => {
+        document.addEventListener('click', function handler(e) {
+          if (!panel.contains(e.target) && e.target !== cartBtn) {
+            panel.remove();
+            document.removeEventListener('click', handler);
+          }
+        });
+      }, 0);
+
+    });
+  }
+
+  loadHistory();
+
+});
